@@ -8,8 +8,8 @@ use Brunocfalcao\OcBridge\Services\OpenClawGateway;
 use Illuminate\Support\Facades\Facade;
 
 /**
- * @method static array sendMessage(string $message, ?string $memoryId = null)
- * @method static void streamMessage(string $message, ?string $memoryId, callable $onEvent, ?callable $onIdle = null)
+ * @method static array sendMessage(string $message, ?string $memoryId = null, ?string $agentId = null)
+ * @method static void streamMessage(string $message, ?string $memoryId, callable $onEvent, ?callable $onIdle = null, ?string $agentId = null)
  *
  * @see \Brunocfalcao\OcBridge\Services\OpenClawGateway
  */

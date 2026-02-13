@@ -14,6 +14,7 @@ class OpenClawGateway
     private string $token;
     private int $timeoutSeconds;
     private string $sessionPrefix;
+    private string $defaultAgent;
 
     public function __construct()
     {
@@ -21,6 +22,7 @@ class OpenClawGateway
         $this->token = (string) config('oc-bridge.gateway.token', '');
         $this->timeoutSeconds = (int) config('oc-bridge.gateway.timeout', 600);
         $this->sessionPrefix = (string) config('oc-bridge.session_prefix', 'market-studies');
+        $this->defaultAgent = (string) config('oc-bridge.default_agent', 'main');
     }
 
     /**
@@ -34,9 +36,10 @@ class OpenClawGateway
      *
      * @param  string  $message  The prompt to send to the agent
      * @param  string|null  $memoryId  UUID for memory continuity across calls
+     * @param  string|null  $agentId  OpenClaw agent to route to (null = default from config)
      * @return array{reply: string, session_key: string}
      */
-    public function sendMessage(string $message, ?string $memoryId = null): array
+    public function sendMessage(string $message, ?string $memoryId = null, ?string $agentId = null): array
     {
         $client = new Client($this->wsUrl, [
             'timeout' => $this->timeoutSeconds,
@@ -44,7 +47,7 @@ class OpenClawGateway
 
         try {
             $runId = Str::uuid()->toString();
-            $sessionKey = $this->buildSessionKey($memoryId);
+            $sessionKey = $this->buildSessionKey($memoryId, $agentId);
 
             $this->readNonce($client);
             $this->authenticate($client, $runId);
@@ -63,8 +66,9 @@ class OpenClawGateway
      *
      * @param  callable(string $type, array $data): void  $onEvent  Types: 'delta', 'complete', 'error'
      * @param  callable(): void|null  $onIdle  Called periodically during wait (keepalive)
+     * @param  string|null  $agentId  OpenClaw agent to route to (null = default from config)
      */
-    public function streamMessage(string $message, ?string $memoryId, callable $onEvent, ?callable $onIdle = null): void
+    public function streamMessage(string $message, ?string $memoryId, callable $onEvent, ?callable $onIdle = null, ?string $agentId = null): void
     {
         $client = new Client($this->wsUrl, [
             'timeout' => 30,
@@ -72,7 +76,7 @@ class OpenClawGateway
 
         try {
             $runId = Str::uuid()->toString();
-            $sessionKey = $this->buildSessionKey($memoryId);
+            $sessionKey = $this->buildSessionKey($memoryId, $agentId);
 
             $this->readNonce($client);
             $this->authenticate($client, $runId);
@@ -148,16 +152,18 @@ class OpenClawGateway
     /**
      * Build the session key for OpenClaw.
      *
-     * The session key determines which OpenClaw session/memory context
-     * is used. By including the memoryId, all calls for the same study
-     * share the same agent session, enabling Marlowe to accumulate
-     * knowledge across analytical steps.
+     * Format: agent:{agentId}:{prefix}-{memoryId}
+     *
+     * The agent ID in the session key determines which OpenClaw agent
+     * handles the request. The memoryId enables context continuity
+     * across multiple calls for the same study.
      */
-    private function buildSessionKey(?string $memoryId): string
+    private function buildSessionKey(?string $memoryId, ?string $agentId = null): string
     {
+        $agent = $agentId ?? $this->defaultAgent;
         $suffix = $memoryId ?? 'default';
 
-        return 'agent:main:'.$this->sessionPrefix.'-'.$suffix;
+        return "agent:{$agent}:{$this->sessionPrefix}-{$suffix}";
     }
 
     /**

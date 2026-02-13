@@ -32,6 +32,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Default Agent
+    |--------------------------------------------------------------------------
+    |
+    | The OpenClaw agent ID to route messages to by default. Can be
+    | overridden per-call via the $agentId parameter.
+    |
+    */
+
+    'default_agent' => env('OC_DEFAULT_AGENT', 'main'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Browser (CDP Screenshots)
     |--------------------------------------------------------------------------
     |
