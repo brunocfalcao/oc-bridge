@@ -4,61 +4,68 @@ declare(strict_types=1);
 
 namespace Brunocfalcao\OCBridge\Services;
 
+use Brunocfalcao\OCBridge\Contracts\Browser;
+use Brunocfalcao\OCBridge\Exceptions\BrowserException;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 
-class BrowserService
+/**
+ * Headless Chrome browser automation via Chrome DevTools Protocol.
+ *
+ * Provides a pure-PHP CDP client — no Node.js or Puppeteer required.
+ * Manages its own raw WebSocket connection to Chrome for sending
+ * CDP commands (navigate, screenshot, evaluate JS).
+ *
+ * Tab management is intelligent: opening a URL on a domain that already
+ * has an open tab reuses that tab instead of creating a new one.
+ */
+class BrowserService implements Browser
 {
-    private string $browserUrl;
     private ?string $targetId = null;
+
     private int $commandId = 0;
-    /** @var resource|null */
+
+    /** @var resource|null Raw TCP socket for CDP WebSocket communication. */
     private $wsConnection = null;
+
     private ?string $wsDebuggerUrl = null;
 
-    public function __construct(string $browserUrl = 'http://127.0.0.1:9222')
-    {
-        $this->browserUrl = $browserUrl;
-    }
+    public function __construct(
+        private readonly string $browserUrl = 'http://127.0.0.1:9222',
+    ) {}
 
     /**
-     * Open a new browser tab and navigate to URL.
+     * Open a URL in a browser tab.
+     *
+     * If a tab already exists on the same domain, it is reused (navigated
+     * to the new URL). Otherwise a new tab is created.
+     *
+     * @return string The browser target/tab ID.
+     *
+     * @throws BrowserException If Chrome is unreachable or refuses the request.
      */
     public function open(string $url): string
     {
         $parsedHost = parse_url($url, PHP_URL_HOST);
 
-        // Reuse existing tab on same domain
-        try {
-            $existingTargets = Http::get("{$this->browserUrl}/json");
-            if ($existingTargets->successful()) {
-                foreach ($existingTargets->json() as $target) {
-                    if (($target['type'] ?? '') !== 'page') {
-                        continue;
-                    }
-                    $targetHost = parse_url($target['url'] ?? '', PHP_URL_HOST);
-                    if ($targetHost === $parsedHost) {
-                        $this->targetId = $target['id'];
-                        $this->wsDebuggerUrl = $target['webSocketDebuggerUrl'] ?? null;
-                        $this->disconnectWebSocket();
+        // Try to reuse an existing tab on the same domain.
+        if ($target = $this->findTabByHost($parsedHost)) {
+            $this->targetId = $target['id'];
+            $this->wsDebuggerUrl = $target['webSocketDebuggerUrl'] ?? null;
+            $this->disconnectWebSocket();
 
-                        if (($target['url'] ?? '') !== $url) {
-                            $this->navigate($url);
-                        }
-
-                        return $this->targetId;
-                    }
-                }
+            if (($target['url'] ?? '') !== $url) {
+                $this->navigate($url);
             }
-        } catch (\Exception $e) {
-            // Fall through to create a new tab
+
+            return $this->targetId;
         }
 
+        // No matching tab — open a new one.
         $encodedUrl = urlencode($url);
         $response = Http::put("{$this->browserUrl}/json/new?{$encodedUrl}");
 
         if (! $response->successful()) {
-            throw new \Exception('Failed to open browser: '.$response->body());
+            throw new BrowserException('Failed to open browser tab: '.$response->body());
         }
 
         $data = $response->json();
@@ -66,7 +73,7 @@ class BrowserService
         $this->wsDebuggerUrl = $data['webSocketDebuggerUrl'] ?? null;
 
         if (! $this->targetId) {
-            throw new \Exception('No target ID returned from browser');
+            throw new BrowserException('No target ID returned from Chrome');
         }
 
         $this->disconnectWebSocket();
@@ -77,6 +84,8 @@ class BrowserService
 
     /**
      * Navigate to a URL in the current tab.
+     *
+     * @throws BrowserException If no tab is open or navigation fails.
      */
     public function navigate(string $url): void
     {
@@ -86,47 +95,29 @@ class BrowserService
     }
 
     /**
-     * Take a screenshot (full page by default).
+     * Take a screenshot of the current page.
      *
-     * @return string Base64 encoded PNG data, or the file path if $path is given
+     * @param  string|null $path      Save PNG to this path. Null = return base64 data.
+     * @param  bool        $fullPage  Capture entire scrollable page (true) or viewport only.
+     * @return string File path if $path was given, otherwise base64-encoded PNG.
+     *
+     * @throws BrowserException If no tab is open or the screenshot fails.
      */
     public function screenshot(?string $path = null, bool $fullPage = true): string
     {
         $this->ensureTarget();
 
-        $screenshotParams = ['format' => 'png'];
+        $params = ['format' => 'png'];
 
         if ($fullPage) {
-            $layout = $this->sendCommand('Page.getLayoutMetrics');
-            $contentSize = $layout['cssContentSize'] ?? $layout['contentSize'] ?? null;
-            $viewport = $layout['cssLayoutViewport'] ?? $layout['layoutViewport'] ?? null;
-
-            if ($contentSize || $viewport) {
-                $width = max(
-                    (float) ($contentSize['width'] ?? 0),
-                    (float) ($viewport['clientWidth'] ?? 0),
-                );
-                $height = max(
-                    (float) ($contentSize['height'] ?? 0),
-                    (float) ($viewport['clientHeight'] ?? 0),
-                );
-
-                $screenshotParams['captureBeyondViewport'] = true;
-                $screenshotParams['clip'] = [
-                    'x' => 0,
-                    'y' => 0,
-                    'width' => $width,
-                    'height' => $height,
-                    'scale' => 1,
-                ];
-            }
+            $params = array_merge($params, $this->fullPageClip());
         }
 
-        $result = $this->sendCommand('Page.captureScreenshot', $screenshotParams);
+        $result = $this->sendCommand('Page.captureScreenshot', $params);
         $imageData = $result['data'] ?? null;
 
         if (! $imageData) {
-            throw new \Exception('Screenshot failed');
+            throw new BrowserException('Screenshot capture returned no data');
         }
 
         if ($path) {
@@ -139,21 +130,21 @@ class BrowserService
     }
 
     /**
-     * Test connection to headless Chrome.
+     * Test whether headless Chrome is running and reachable.
      */
     public function testConnection(): bool
     {
         try {
-            $response = Http::timeout(5)->get("{$this->browserUrl}/json/version");
-
-            return $response->successful();
+            return Http::timeout(5)
+                ->get("{$this->browserUrl}/json/version")
+                ->successful();
         } catch (\Exception) {
             return false;
         }
     }
 
     /**
-     * Close the browser tab.
+     * Close the current browser tab and release resources.
      */
     public function close(): void
     {
@@ -170,8 +161,14 @@ class BrowserService
         $this->disconnectWebSocket();
     }
 
+    // -----------------------------------------------------------------------
+    //  CDP command layer
+    // -----------------------------------------------------------------------
+
     /**
-     * Send a Chrome DevTools Protocol command.
+     * Send a Chrome DevTools Protocol command and wait for the response.
+     *
+     * @throws BrowserException If the command fails, times out, or the connection drops.
      */
     private function sendCommand(string $method, array $params = []): array
     {
@@ -180,13 +177,11 @@ class BrowserService
 
         $id = ++$this->commandId;
 
-        $payload = json_encode([
+        $this->wsSend(json_encode([
             'id' => $id,
             'method' => $method,
             'params' => (object) $params,
-        ]);
-
-        $this->wsSend($payload);
+        ]));
 
         $deadline = microtime(true) + 30;
 
@@ -194,7 +189,7 @@ class BrowserService
             $frame = $this->wsReceive();
 
             if ($frame === null) {
-                throw new \Exception("WebSocket connection closed while waiting for CDP response to {$method}");
+                throw new BrowserException("WebSocket closed while waiting for CDP response to {$method}");
             }
 
             $data = json_decode($frame, true);
@@ -203,22 +198,159 @@ class BrowserService
                 continue;
             }
 
+            // Skip CDP event notifications (no id field).
             if (isset($data['method']) && ! isset($data['id'])) {
                 continue;
             }
 
             if (isset($data['id']) && $data['id'] === $id) {
                 if (isset($data['error'])) {
-                    throw new \Exception("CDP error for {$method}: ".($data['error']['message'] ?? json_encode($data['error'])));
+                    $msg = $data['error']['message'] ?? json_encode($data['error']);
+                    throw new BrowserException("CDP error for {$method}: {$msg}");
                 }
 
                 return $data['result'] ?? [];
             }
         }
 
-        throw new \Exception("Timeout waiting for CDP response to {$method}");
+        throw new BrowserException("Timeout waiting for CDP response to {$method}");
     }
 
+    // -----------------------------------------------------------------------
+    //  Tab/target management
+    // -----------------------------------------------------------------------
+
+    /**
+     * Find an existing page tab whose URL matches the given host.
+     *
+     * @return array|null The matching target data, or null if none found.
+     */
+    private function findTabByHost(?string $host): ?array
+    {
+        if (! $host) {
+            return null;
+        }
+
+        try {
+            $response = Http::get("{$this->browserUrl}/json");
+
+            if (! $response->successful()) {
+                return null;
+            }
+
+            foreach ($response->json() as $target) {
+                if (($target['type'] ?? '') !== 'page') {
+                    continue;
+                }
+
+                if (parse_url($target['url'] ?? '', PHP_URL_HOST) === $host) {
+                    return $target;
+                }
+            }
+        } catch (\Exception) {
+            // Chrome unreachable — caller will try to create a new tab.
+        }
+
+        return null;
+    }
+
+    /**
+     * Ensure we have an active target tab, or adopt the first available one.
+     *
+     * @throws BrowserException If no tab is open and none can be found.
+     */
+    private function ensureTarget(): void
+    {
+        if ($this->targetId) {
+            return;
+        }
+
+        try {
+            $response = Http::get("{$this->browserUrl}/json");
+
+            if ($response->successful()) {
+                foreach ($response->json() as $target) {
+                    if (($target['type'] ?? '') === 'page') {
+                        $this->targetId = $target['id'];
+                        $this->wsDebuggerUrl = $target['webSocketDebuggerUrl'] ?? null;
+                        $this->disconnectWebSocket();
+
+                        return;
+                    }
+                }
+            }
+        } catch (\Exception) {
+            // Fall through to the exception below.
+        }
+
+        throw new BrowserException('No browser tab open. Call open() first.');
+    }
+
+    /**
+     * Wait for the page to reach readyState === 'complete'.
+     */
+    private function waitForPageReady(int $timeoutSeconds = 15): void
+    {
+        sleep(1); // Brief pause for Chrome to start loading.
+
+        $this->sendCommand('Runtime.evaluate', [
+            'expression' => "new Promise((resolve) => {
+                const timeout = setTimeout(() => resolve('timeout'), ".($timeoutSeconds * 1000).");
+                const check = () => {
+                    if (document.readyState === 'complete') {
+                        clearTimeout(timeout);
+                        resolve('ready');
+                    } else {
+                        setTimeout(check, 100);
+                    }
+                };
+                check();
+            })",
+            'awaitPromise' => true,
+            'returnByValue' => true,
+        ]);
+    }
+
+    /**
+     * Calculate full-page clip dimensions from page layout metrics.
+     */
+    private function fullPageClip(): array
+    {
+        $layout = $this->sendCommand('Page.getLayoutMetrics');
+        $contentSize = $layout['cssContentSize'] ?? $layout['contentSize'] ?? null;
+        $viewport = $layout['cssLayoutViewport'] ?? $layout['layoutViewport'] ?? null;
+
+        if (! $contentSize && ! $viewport) {
+            return [];
+        }
+
+        $width = max(
+            (float) ($contentSize['width'] ?? 0),
+            (float) ($viewport['clientWidth'] ?? 0),
+        );
+
+        $height = max(
+            (float) ($contentSize['height'] ?? 0),
+            (float) ($viewport['clientHeight'] ?? 0),
+        );
+
+        return [
+            'captureBeyondViewport' => true,
+            'clip' => [
+                'x' => 0,
+                'y' => 0,
+                'width' => $width,
+                'height' => $height,
+                'scale' => 1,
+            ],
+        ];
+    }
+
+    // -----------------------------------------------------------------------
+    //  Raw WebSocket layer (CDP communication)
+    // -----------------------------------------------------------------------
+
+    /** Ensure we have an active WebSocket connection to the target's debugger. */
     private function ensureWebSocket(): void
     {
         if ($this->wsConnection && is_resource($this->wsConnection)) {
@@ -229,7 +361,7 @@ class BrowserService
             $response = Http::get("{$this->browserUrl}/json");
 
             if (! $response->successful()) {
-                throw new \Exception('Failed to fetch browser targets');
+                throw new BrowserException('Failed to fetch browser targets');
             }
 
             foreach ($response->json() as $target) {
@@ -240,64 +372,62 @@ class BrowserService
             }
 
             if (! $this->wsDebuggerUrl) {
-                throw new \Exception("No webSocketDebuggerUrl found for target {$this->targetId}");
+                throw new BrowserException("No webSocketDebuggerUrl found for target {$this->targetId}");
             }
         }
 
         $this->connectWebSocket();
     }
 
+    /** Open a raw WebSocket connection to Chrome's debugger endpoint. */
     private function connectWebSocket(): void
     {
         $parsed = parse_url($this->wsDebuggerUrl);
-
         $host = $parsed['host'] ?? 'localhost';
         $port = $parsed['port'] ?? 9222;
         $path = $parsed['path'] ?? '/';
 
-        $socket = @stream_socket_client(
-            "tcp://{$host}:{$port}",
-            $errno,
-            $errstr,
-            10,
-        );
+        $socket = @stream_socket_client("tcp://{$host}:{$port}", $errno, $errstr, 10);
 
         if (! $socket) {
-            throw new \Exception("WebSocket TCP connect failed: [{$errno}] {$errstr}");
+            throw new BrowserException("WebSocket TCP connect failed: [{$errno}] {$errstr}");
         }
 
         $key = base64_encode(random_bytes(16));
-        $handshake = "GET {$path} HTTP/1.1\r\n"
-            ."Host: {$host}:{$port}\r\n"
-            ."Upgrade: websocket\r\n"
-            ."Connection: Upgrade\r\n"
-            ."Sec-WebSocket-Key: {$key}\r\n"
-            ."Sec-WebSocket-Version: 13\r\n"
-            ."\r\n";
 
-        fwrite($socket, $handshake);
+        fwrite($socket, implode("\r\n", [
+            "GET {$path} HTTP/1.1",
+            "Host: {$host}:{$port}",
+            'Upgrade: websocket',
+            'Connection: Upgrade',
+            "Sec-WebSocket-Key: {$key}",
+            'Sec-WebSocket-Version: 13',
+            '',
+            '',
+        ]));
 
-        $responseHeader = '';
+        $header = '';
         while (($line = fgets($socket)) !== false) {
-            $responseHeader .= $line;
+            $header .= $line;
             if (rtrim($line) === '') {
                 break;
             }
         }
 
-        if (strpos($responseHeader, '101') === false) {
+        if (! str_contains($header, '101')) {
             fclose($socket);
-            throw new \Exception('WebSocket handshake failed: '.strtok($responseHeader, "\r\n"));
+            throw new BrowserException('WebSocket handshake failed: '.strtok($header, "\r\n"));
         }
 
         stream_set_timeout($socket, 30);
         $this->wsConnection = $socket;
     }
 
+    /** Send a masked WebSocket text frame. */
     private function wsSend(string $payload): void
     {
         $length = strlen($payload);
-        $frame = chr(0x81);
+        $frame = chr(0x81); // FIN + text opcode
 
         if ($length <= 125) {
             $frame .= chr(0x80 | $length);
@@ -317,10 +447,11 @@ class BrowserService
         $written = @fwrite($this->wsConnection, $frame);
 
         if ($written === false || $written < strlen($frame)) {
-            throw new \Exception('Failed to write WebSocket frame');
+            throw new BrowserException('Failed to write WebSocket frame');
         }
     }
 
+    /** Receive and decode a WebSocket frame (handles ping/pong automatically). */
     private function wsReceive(): ?string
     {
         $header = $this->wsReadExact(2);
@@ -329,14 +460,14 @@ class BrowserService
             return null;
         }
 
-        $firstByte = ord($header[0]);
-        $secondByte = ord($header[1]);
-        $opcode = $firstByte & 0x0F;
+        $opcode = ord($header[0]) & 0x0F;
 
+        // Close frame.
         if ($opcode === 0x08) {
             return null;
         }
 
+        $secondByte = ord($header[1]);
         $masked = ($secondByte & 0x80) !== 0;
         $payloadLength = $secondByte & 0x7F;
 
@@ -376,6 +507,7 @@ class BrowserService
             }
         }
 
+        // Respond to pings automatically, then read the next real frame.
         if ($opcode === 0x09) {
             $this->wsSendPong($payload);
 
@@ -385,6 +517,7 @@ class BrowserService
         return $payload;
     }
 
+    /** Read exactly $length bytes from the WebSocket connection. */
     private function wsReadExact(int $length): ?string
     {
         $buffer = '';
@@ -396,7 +529,7 @@ class BrowserService
             if ($chunk === false || $chunk === '') {
                 $meta = stream_get_meta_data($this->wsConnection);
                 if ($meta['timed_out']) {
-                    throw new \Exception('WebSocket read timed out');
+                    throw new BrowserException('WebSocket read timed out');
                 }
 
                 return null;
@@ -409,84 +542,28 @@ class BrowserService
         return $buffer;
     }
 
+    /** Send a WebSocket pong frame in response to a ping. */
     private function wsSendPong(string $payload): void
     {
-        $length = strlen($payload);
-        $frame = chr(0x8A);
-
         $mask = random_bytes(4);
-        $frame .= chr(0x80 | $length);
-        $frame .= $mask;
+        $frame = chr(0x8A).chr(0x80 | strlen($payload)).$mask;
 
-        for ($i = 0; $i < $length; $i++) {
+        for ($i = 0, $len = strlen($payload); $i < $len; $i++) {
             $frame .= $payload[$i] ^ $mask[$i % 4];
         }
 
         @fwrite($this->wsConnection, $frame);
     }
 
+    /** Close the WebSocket connection gracefully. */
     private function disconnectWebSocket(): void
     {
         if ($this->wsConnection && is_resource($this->wsConnection)) {
             $mask = random_bytes(4);
-            $closeFrame = chr(0x88).chr(0x80).$mask;
-            @fwrite($this->wsConnection, $closeFrame);
+            @fwrite($this->wsConnection, chr(0x88).chr(0x80).$mask);
             @fclose($this->wsConnection);
         }
 
         $this->wsConnection = null;
-    }
-
-    private function waitForPageReady(int $timeoutSeconds = 15): void
-    {
-        sleep(1);
-
-        $this->sendCommand('Runtime.evaluate', [
-            'expression' => "new Promise((resolve) => {
-                const timeout = setTimeout(() => resolve('timeout'), ".($timeoutSeconds * 1000).");
-                const check = () => {
-                    if (document.readyState === 'complete') {
-                        clearTimeout(timeout);
-                        resolve('ready');
-                    } else {
-                        setTimeout(check, 100);
-                    }
-                };
-                check();
-            })",
-            'awaitPromise' => true,
-            'returnByValue' => true,
-        ]);
-    }
-
-    private function ensureTarget(): void
-    {
-        if ($this->targetId) {
-            return;
-        }
-
-        try {
-            $response = Http::get("{$this->browserUrl}/json");
-
-            if (! $response->successful()) {
-                throw new \Exception('No browser tab open. Call open() first.');
-            }
-
-            $targets = $response->json();
-
-            foreach ($targets as $target) {
-                if (($target['type'] ?? '') === 'page') {
-                    $this->targetId = $target['id'];
-                    $this->wsDebuggerUrl = $target['webSocketDebuggerUrl'] ?? null;
-                    $this->disconnectWebSocket();
-
-                    return;
-                }
-            }
-        } catch (\Exception $e) {
-            // Fall through
-        }
-
-        throw new \Exception('No browser tab open. Call open() first.');
     }
 }
