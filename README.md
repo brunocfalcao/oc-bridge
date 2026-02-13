@@ -1,11 +1,11 @@
-# oc-bridge
+# laravel-openclaw-bridge
 
 OpenClaw bridge for Laravel. Provides WebSocket communication with the OpenClaw AI gateway, SSE streaming, and CDP browser screenshots.
 
 ## Installation
 
 ```bash
-composer require brunocfalcao/oc-bridge
+composer require brunocfalcao/laravel-openclaw-bridge
 ```
 
 Publish the config:

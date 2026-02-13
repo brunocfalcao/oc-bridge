@@ -1,9 +1,9 @@
 {
-    "name": "brunocfalcao/oc-bridge",
+    "name": "brunocfalcao/laravel-openclaw-bridge",
     "description": "OpenClaw bridge for Laravel — WebSocket client, SSE streaming, CDP screenshots, memory management",
     "type": "library",
     "license": "MIT",
-    "homepage": "https://github.com/brunocfalcao/oc-bridge",
+    "homepage": "https://github.com/brunocfalcao/laravel-openclaw-bridge",
     "authors": [
         {
             "name": "Bruno Falcao",
