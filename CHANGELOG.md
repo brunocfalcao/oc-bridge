@@ -2,6 +2,21 @@
 
 All notable changes to this package will be documented in this file.
 
+## 1.7.1 - 2026-02-15
+
+### Improvements
+
+- [IMPROVED] Added MIT LICENSE file (was declared in composer.json but file was missing)
+- [IMPROVED] Added `.gitignore` for standard PHP package exclusions
+- [IMPROVED] Fixed `OcBridge` facade docblock — corrected `DTOs\GatewayResponse` namespace to `Data\GatewayResponse` and removed browser methods that don't work through the Gateway-bound facade
+- [IMPROVED] Fixed README timeout default from `840` to `600` to match actual `config/oc-bridge.php` default
+- [IMPROVED] Changed default session prefix from `market-studies` to `laravel` (config, service provider, README)
+
+### Dependencies
+
+- [DEPENDENCIES] Pinned `textalk/websocket` from `*` to `^1.5`
+- [DEPENDENCIES] Fixed composer.json description: "SSE streaming" → "real-time streaming"
+
 ## 1.7.0 - 2026-02-15
 
 ### Improvements

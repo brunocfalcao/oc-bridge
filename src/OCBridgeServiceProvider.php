@@ -21,7 +21,7 @@ class OCBridgeServiceProvider extends ServiceProvider
                 wsUrl: (string) config('oc-bridge.gateway.url', 'ws://127.0.0.1:18789'),
                 token: (string) config('oc-bridge.gateway.token', ''),
                 timeoutSeconds: (int) config('oc-bridge.gateway.timeout', 600),
-                sessionPrefix: (string) config('oc-bridge.session_prefix', 'market-studies'),
+                sessionPrefix: (string) config('oc-bridge.session_prefix', 'laravel'),
                 defaultAgent: (string) config('oc-bridge.default_agent', 'main'),
                 clientName: (string) config('app.name', 'Laravel'),
             );

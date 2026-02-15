@@ -1,6 +1,6 @@
 {
     "name": "brunocfalcao/laravel-openclaw-bridge",
-    "description": "OpenClaw bridge for Laravel — WebSocket client, SSE streaming, CDP screenshots, memory management",
+    "description": "OpenClaw bridge for Laravel — WebSocket client, real-time streaming, CDP screenshots, memory management",
     "type": "library",
     "license": "MIT",
     "homepage": "https://github.com/brunocfalcao/laravel-openclaw-bridge",
@@ -13,7 +13,7 @@
     "require": {
         "php": "^8.2",
         "illuminate/support": "^12.0",
-        "textalk/websocket": "*"
+        "textalk/websocket": "^1.5"
     },
     "autoload": {
         "psr-4": {

@@ -28,7 +28,7 @@ return [
     |
     */
 
-    'session_prefix' => env('OC_SESSION_PREFIX', 'market-studies'),
+    'session_prefix' => env('OC_SESSION_PREFIX', 'laravel'),
 
     /*
     |--------------------------------------------------------------------------
