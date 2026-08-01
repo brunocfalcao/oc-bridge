@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## 1.7.2 - 2026-08-01
+
+### Dependencies
+
+- [IMPROVED] The package now supports Laravel 13 while preserving Laravel 12
+  compatibility.
+
 ## 1.7.1 - 2026-02-15
 
 ### Improvements
